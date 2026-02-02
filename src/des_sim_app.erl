@@ -1,5 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @doc DES Simulation OTP Application
+%%% Configuration loaded from config/sys.local.config
 %%% @end
 %%%-------------------------------------------------------------------
 -module(des_sim_app).
@@ -11,27 +12,19 @@
 %% API
 -export([run/0, run/1]).
 
-%% Default configuration
--define(DEFAULT_CONFIG, #{
-    grid_width => 50,
-    grid_height => 50,
-    num_bots => 10,
-    bot_speed => 1,
-    simulation_duration_hrs => 1
-}).
-
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-%% @doc Run simulation with default config
+%% @doc Run simulation with config from sys.local.config
 run() ->
-    run(?DEFAULT_CONFIG).
+    run(#{}).
 
-%% @doc Run simulation with custom config
-run(Config) ->
-    FullConfig = maps:merge(?DEFAULT_CONFIG, Config),
-    application:set_env(des_sim, config, FullConfig),
+%% @doc Run simulation with custom config (overrides sys.local.config)
+run(Overrides) ->
+    %% Read from application env (loaded from sys.local.config)
+    Config = load_config(Overrides),
+    application:set_env(des_sim, config, Config),
     application:ensure_all_started(des_sim).
 
 %%%===================================================================
@@ -39,7 +32,11 @@ run(Config) ->
 %%%===================================================================
 
 start(_StartType, _StartArgs) ->
-    Config = application:get_env(des_sim, config, ?DEFAULT_CONFIG),
+    %% Load config from application env or use passed config
+    Config = case application:get_env(des_sim, config) of
+        {ok, C} when is_map(C) -> C;
+        _ -> load_config(#{})
+    end,
 
     io:format("~n========================================~n", []),
     io:format("DES Simulation - Erlang~n", []),
@@ -76,6 +73,35 @@ stop(_State) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+%% @doc Load configuration from application env with defaults
+load_config(Overrides) ->
+    Defaults = #{
+        grid_width => 50,
+        grid_height => 50,
+        num_bots => 10,
+        bot_speed => 1,
+        simulation_duration_hrs => 1
+    },
+
+    %% Read individual keys from application env (set by sys.config)
+    FromEnv = #{
+        grid_width => get_env(grid_width, maps:get(grid_width, Defaults)),
+        grid_height => get_env(grid_height, maps:get(grid_height, Defaults)),
+        num_bots => get_env(num_bots, maps:get(num_bots, Defaults)),
+        bot_speed => get_env(bot_speed, maps:get(bot_speed, Defaults)),
+        simulation_duration_hrs => get_env(simulation_duration_hrs,
+                                           maps:get(simulation_duration_hrs, Defaults))
+    },
+
+    %% Merge: Defaults < FromEnv < Overrides
+    maps:merge(FromEnv, Overrides).
+
+get_env(Key, Default) ->
+    case application:get_env(des_sim, Key) of
+        {ok, Value} -> Value;
+        undefined -> Default
+    end.
 
 spawn_bots(NumBots) ->
     lists:foreach(fun(N) ->

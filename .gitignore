@@ -28,3 +28,6 @@ Thumbs.db
 # Release artifacts
 rel/
 _rel/
+
+# Local config (user-specific overrides)
+config/sys.local.config
