@@ -1,0 +1,22 @@
+{application, des_sim, [
+    {description, "Discrete Event Simulation in Erlang"},
+    {vsn, "0.1.0"},
+    {registered, [des_scheduler, des_grid, des_bot_sup, des_sim_sup]},
+    {mod, {des_sim_app, []}},
+    {applications, [
+        kernel,
+        stdlib
+    ]},
+    {env, []},
+    {modules, [
+        des_sim_app,
+        des_sim_sup,
+        des_scheduler,
+        des_grid,
+        des_astar,
+        des_bot,
+        des_bot_sup
+    ]},
+    {licenses, ["MIT"]},
+    {links, []}
+]}.

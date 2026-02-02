@@ -1,0 +1,30 @@
+# Rebar3
+_build/
+_checkouts/
+rebar.lock
+
+# Erlang
+*.beam
+*.plt
+erl_crash.dump
+.eunit/
+.rebar3/
+ebin/
+log/
+logs/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Release artifacts
+rel/
+_rel/
