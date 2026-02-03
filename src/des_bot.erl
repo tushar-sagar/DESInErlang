@@ -63,7 +63,7 @@ init(BotId) ->
 
     %% Compute initial path with timing
     {PathTime, {ok, Path}} = timer:tc(fun() ->
-        des_astar:find_path(StartPos, Destination, GridWidth, GridHeight)
+        cowhca_util:find_path(StartPos, Destination)
     end),
     PathLength = length(Path) - 1,  % Exclude start position
 
@@ -138,12 +138,11 @@ terminate(_Reason, _State) ->
 %%% Internal functions
 %%%===================================================================
 
-do_move(SimTime, #state{path = [_Current | []]} = State) ->
-    %% Reached destination (path only contains current position)
+do_move(SimTime, #state{path = [_Current | []], position = Pos, destination = Dest} = State)
+  when Pos =:= Dest ->
+    %% Reached destination - trip completed
     #state{
         id = BotId,
-        position = Pos,
-        destination = Dest,
         grid_width = W,
         grid_height = H,
         trips_completed = Trips,
@@ -158,7 +157,7 @@ do_move(SimTime, #state{path = [_Current | []]} = State) ->
 
     %% Compute path with timing
     {PathTime, {ok, NewPath}} = timer:tc(fun() ->
-        des_astar:find_path(Pos, NewDest, W, H)
+        cowhca_util:find_path(Pos, NewDest)
     end),
     PathLength = length(NewPath) - 1,
 
@@ -177,6 +176,42 @@ do_move(SimTime, #state{path = [_Current | []]} = State) ->
         destination = NewDest,
         path = NewPath,
         trips_completed = Trips + 1,
+        path_requests = PathReqs + 1,
+        total_path_length = TotalPathLen + PathLength,
+        path_compute_time_us = TotalPathTime + PathTime
+    };
+
+do_move(SimTime, #state{path = [_Current | []]} = State) ->
+    %% Path exhausted but not at destination (window/partial path)
+    %% Re-request path to the same destination
+    #state{
+        id = BotId,
+        position = Pos,
+        destination = Dest,
+        bot_speed = Speed,
+        path_requests = PathReqs,
+        total_path_length = TotalPathLen,
+        path_compute_time_us = TotalPathTime
+    } = State,
+
+    %% Compute new path from current position to same destination
+    {PathTime, {ok, NewPath}} = timer:tc(fun() ->
+        cowhca_util:find_path(Pos, Dest)
+    end),
+    PathLength = length(NewPath) - 1,
+
+    %% Update grid
+    des_grid:update_bot_position(BotId, Pos, Dest),
+
+    io:format("[T=~.3f] ~p window path ended at ~p, re-routing to ~p (path_len=~p)~n",
+              [SimTime, BotId, Pos, Dest, PathLength]),
+
+    %% Schedule next move event
+    NextTime = SimTime + (1.0 / Speed),
+    des_scheduler:schedule_event(NextTime, bot_move, #{}),
+
+    State#state{
+        path = NewPath,
         path_requests = PathReqs + 1,
         total_path_length = TotalPathLen + PathLength,
         path_compute_time_us = TotalPathTime + PathTime
