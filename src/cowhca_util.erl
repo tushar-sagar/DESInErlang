@@ -12,7 +12,9 @@
 -export([
     find_path/2,
     find_path/3,
-    find_path_cowhca/2,
+    find_path/4,
+    find_path_for_bot/3,
+    find_path_cowhca/3,
     find_path_local/4,
     extract_coordinates/1,
     test_path/0,
@@ -22,7 +24,10 @@
     connect/2,
     benchmark/0,
     benchmark/1,
-    benchmark/3
+    benchmark/3,
+    update_moving_reservation/4,
+    remove_moving_reservation/3,
+    bot_id_to_integer/1
 ]).
 
 %% Defaults
@@ -36,17 +41,24 @@
 
 %% @doc Find path based on config (reads from application env)
 %% Returns {ok, Path} where Path is list of {X, Y} coordinates
+%% Uses default butler ID (1) for COWHCA
 find_path(Start, Goal) ->
     Config = get_config(),
     find_path(Start, Goal, Config).
 
 %% @doc Find path with explicit config
 %% Config is a map with keys: pathfinder, grid_width, grid_height, cowhca_node, cowhca_cookie
+%% Uses default butler ID (1) for COWHCA
 find_path(Start, Goal, Config) ->
+    find_path(Start, Goal, Config, 1).
+
+%% @doc Find path with explicit config and butler ID
+%% ButlerId can be atom (bot_1) or integer (1) - converted to integer for butler_server
+find_path(Start, Goal, Config, ButlerId) ->
     Pathfinder = maps:get(pathfinder, Config, ?DEFAULT_PATHFINDER),
     case Pathfinder of
         cowhca ->
-            find_path_cowhca(Start, Goal);
+            find_path_cowhca(Start, Goal, ButlerId);
         local ->
             GridWidth = maps:get(grid_width, Config, 50),
             GridHeight = maps:get(grid_height, Config, 50),
@@ -55,23 +67,77 @@ find_path(Start, Goal, Config) ->
             {error, {unknown_pathfinder, Pathfinder}}
     end.
 
+%% @doc Find path with butler ID using default config
+%% Convenience function for des_bot to pass bot ID without needing explicit config
+%% ButlerId can be atom (bot_1) or integer (1) - converted to integer for butler_server
+find_path_for_bot(Start, Goal, ButlerId) ->
+    Config = get_config(),
+    find_path(Start, Goal, Config, ButlerId).
+
 %% @doc Find path using local A* algorithm
 find_path_local(Start, Goal, GridWidth, GridHeight) ->
     des_astar:find_path(Start, Goal, GridWidth, GridHeight).
 
 %% @doc Find path using butler_server COWHCA via RPC
 %% Returns {ok, Path} where Path is list of {X, Y} coordinates
-find_path_cowhca(Start, Goal) ->
+%% ButlerId can be atom (bot_1) or integer (1) - converted to integer for butler_server
+find_path_cowhca(Start, Goal, ButlerId) ->
     ensure_distribution_started(),
     Node = get_cowhca_node(),
     Cookie = get_cowhca_cookie(),
     erlang:set_cookie(Node, Cookie),
-    case call_path_calc(Node, Start, Goal) of
+    IntButlerId = bot_id_to_integer(ButlerId),
+    case call_path_calc(Node, Start, Goal, IntButlerId) of
+        {ok, {no_path, Reason}} ->
+            {error, {no_path, Reason}};
         {ok, RawResult} ->
             Path = extract_coordinates(RawResult),
-            {ok, Path};
+            case Path of
+                [] -> {error, no_path};
+                _ -> {ok, Path}
+            end;
         Error ->
             Error
+    end.
+
+%% @doc Book a moving reservation on butler_server for a coordinate
+%% ResStartTime and ResEndTime are in Unix epoch milliseconds
+%% ButlerId can be atom (bot_1) or integer (1) - converted to integer for butler_server
+-spec update_moving_reservation(atom() | integer(), {integer(), integer()}, integer(), integer()) ->
+    ok | {error, term()}.
+update_moving_reservation(ButlerId, Coordinate, ResStartTime, ResEndTime) ->
+    ensure_distribution_started(),
+    Node = get_cowhca_node(),
+    Cookie = get_cowhca_cookie(),
+    erlang:set_cookie(Node, Cookie),
+    IntButlerId = bot_id_to_integer(ButlerId),
+    Msg = {update_moving_reservation, IntButlerId, Coordinate, ResStartTime, ResEndTime},
+    try
+        gen_server:call({mapf_path_calculator, Node}, Msg, 5000)
+    catch
+        exit:{noproc, _} -> {error, noproc};
+        exit:{timeout, _} -> {error, timeout};
+        _:Reason -> {error, Reason}
+    end.
+
+%% @doc Remove/clear a moving reservation on butler_server after bot has moved
+%% Bdir is the direction (north, south, east, west)
+%% ButlerId can be atom (bot_1) or integer (1) - converted to integer for butler_server
+-spec remove_moving_reservation(atom() | integer(), {integer(), integer()}, atom()) ->
+    ok | {error, term()}.
+remove_moving_reservation(ButlerId, Coordinate, Bdir) ->
+    ensure_distribution_started(),
+    Node = get_cowhca_node(),
+    Cookie = get_cowhca_cookie(),
+    erlang:set_cookie(Node, Cookie),
+    IntButlerId = bot_id_to_integer(ButlerId),
+    Msg = {remove_moving_reservation, IntButlerId, Coordinate, Bdir},
+    try
+        gen_server:call({mapf_path_calculator, Node}, Msg, 5000)
+    catch
+        exit:{noproc, _} -> {error, noproc};
+        exit:{timeout, _} -> {error, timeout};
+        _:Reason -> {error, Reason}
     end.
 
 %% @doc Extract coordinates from COWHCA result
@@ -137,7 +203,7 @@ test_path() ->
 test_path(Start, Goal) ->
     case connect() of
         {ok, _Node} ->
-            Result = find_path_cowhca(Start, Goal),
+            Result = find_path_cowhca(Start, Goal, 1),
             io:format("Path coordinates: ~p~n", [Result]),
             Result;
         Error ->
@@ -160,12 +226,12 @@ benchmark(N, Start, Goal) ->
 
             %% Warmup - 5 calls
             io:format("Warmup (5 calls)...~n"),
-            [find_path_cowhca(Start, Goal) || _ <- lists:seq(1, 5)],
+            [find_path_cowhca(Start, Goal, 1) || _ <- lists:seq(1, 5)],
 
             %% Run benchmark
             Times = [begin
                 T1 = erlang:monotonic_time(microsecond),
-                _Result = find_path_cowhca(Start, Goal),
+                _Result = find_path_cowhca(Start, Goal, 1),
                 T2 = erlang:monotonic_time(microsecond),
                 T2 - T1
             end || _ <- lists:seq(1, N)],
@@ -221,10 +287,10 @@ extract_coord(Info) when is_tuple(Info) ->
 extract_coord(Coord) ->
     Coord.
 
-call_path_calc(Node, {StartX, StartY}, {GoalX, GoalY}) ->
+call_path_calc(Node, {StartX, StartY}, {GoalX, GoalY}, ButlerId) ->
     Timestamp = erlang:monotonic_time(millisecond),
     Result = rpc:call(Node, co_whca_test, path_calc_test, [
-        1,                      % Arg 1: butler id
+        ButlerId,               % Arg 1: butler id (integer)
         undefined,              % Arg 2
         butler@v2_1,            % Arg 3: butler type
         lift_down,              % Arg 4: action
@@ -236,7 +302,6 @@ call_path_calc(Node, {StartX, StartY}, {GoalX, GoalY}) ->
         north,                  % Arg 10: goal direction
         Timestamp               % Arg 11: timestamp
     ], 5000),
-    % io:format("Result from COWHCA RPC: ~p~n", [Result]),
     case Result of
         {badrpc, Reason} ->
             {error, {rpc_failed, Reason}};
@@ -265,3 +330,21 @@ get_env(Key, Default) ->
         {ok, Value} -> Value;
         undefined -> Default
     end.
+
+%% @doc Convert bot atom id (bot_1, bot_2, etc.) to integer (1, 2, etc.)
+%% for butler_server communication
+-spec bot_id_to_integer(atom()) -> integer().
+bot_id_to_integer(BotId) when is_atom(BotId) ->
+    BotIdStr = atom_to_list(BotId),
+    case string:prefix(BotIdStr, "bot_") of
+        nomatch ->
+            %% Try to parse as integer directly
+            case catch list_to_integer(BotIdStr) of
+                N when is_integer(N) -> N;
+                _ -> 1  %% Default to 1 if unparseable
+            end;
+        NumStr ->
+            list_to_integer(NumStr)
+    end;
+bot_id_to_integer(BotId) when is_integer(BotId) ->
+    BotId.

@@ -11,7 +11,8 @@
          schedule_event/3,
          start_simulation/0,
          get_stats/0,
-         get_current_time/0]).
+         get_current_time/0,
+         get_base_monotonic/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -25,6 +26,7 @@
     event_counter :: non_neg_integer(),  % For unique keys at same time
     running :: boolean(),
     start_wall_time :: integer(),
+    base_monotonic :: integer(),  % System time (Unix epoch ms) at simulation start for reservation timestamps
     total_events :: non_neg_integer(),
     bots :: [{pid(), atom()}]  % For final stats
 }).
@@ -61,6 +63,10 @@ get_stats() ->
 get_current_time() ->
     gen_server:call(?SERVER, get_current_time).
 
+%% @doc Get base monotonic time for reservation timestamp mapping
+get_base_monotonic() ->
+    gen_server:call(?SERVER, get_base_monotonic).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -76,6 +82,7 @@ init(Config) ->
         event_counter = 0,
         running = false,
         start_wall_time = 0,
+        base_monotonic = 0,
         total_events = 0,
         bots = []
     }}.
@@ -93,6 +100,9 @@ handle_call(get_stats, _From, State) ->
 handle_call(get_current_time, _From, State) ->
     {reply, State#state.current_time, State};
 
+handle_call(get_base_monotonic, _From, State) ->
+    {reply, State#state.base_monotonic, State};
+
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
@@ -104,10 +114,10 @@ handle_cast({schedule, Time, EventType, Pid, Data}, State) ->
     Event = #event{type = EventType, pid = Pid, data = Data},
     NewQueue = gb_trees:insert(Key, Event, Queue),
 
-    %% Track bot if this is a new bot
-    NewBots = case EventType of
-        bot_init -> [{Pid, maps:get(bot_id, Data, unknown)} | Bots];
-        _ -> Bots
+    %% Track bot if this is a new bot (first event carries bot_id in data)
+    NewBots = case maps:find(bot_id, Data) of
+        {ok, BotId} -> [{Pid, BotId} | Bots];
+        error -> Bots
     end,
 
     {noreply, State#state{
@@ -123,9 +133,12 @@ handle_cast(start_simulation, State) ->
     io:format("Events in queue: ~p~n~n", [gb_trees:size(State#state.event_queue)]),
 
     WallStart = erlang:monotonic_time(millisecond),
+    %% Use system_time for base_monotonic (Unix epoch ms) for cross-node reservation timestamps
+    BaseTime = erlang:system_time(millisecond),
     NewState = State#state{
         running = true,
-        start_wall_time = WallStart
+        start_wall_time = WallStart,
+        base_monotonic = BaseTime
     },
 
     %% Start processing events
@@ -179,12 +192,14 @@ terminate(_Reason, _State) ->
 %%%===================================================================
 
 %% Process a single event by sending it to the target process
+%% All events are synchronous to ensure reservation booking completes before next event
+%% Injects base_monotonic into event data so bots don't need to call back to scheduler
 process_event(#event{type = Type, pid = Pid, data = Data}, State) ->
-    %% Send event to the bot process (synchronous to ensure bot schedules next event)
+    EnrichedData = Data#{base_monotonic => State#state.base_monotonic},
     try
-        gen_server:call(Pid, {event, Type, State#state.current_time, Data}, infinity)
+        gen_server:call(Pid, {event, Type, State#state.current_time, EnrichedData}, infinity)
     catch
-        exit:{noproc, _} -> ok;  % Bot process died
+        exit:{noproc, _} -> ok;
         exit:{timeout, _} -> ok
     end,
     State.
@@ -251,6 +266,7 @@ finish_simulation(State) ->
     TotalPathTimeUs = lists:sum([maps:get(path_compute_time_us, S) || S <- AllStats]),
     TotalPathLen = lists:sum([maps:get(total_path_length, S) || S <- AllStats]),
     TotalDistance = lists:sum([maps:get(total_distance, S) || S <- AllStats]),
+    TotalResFails = lists:sum([maps:get(reservation_failures, S, 0) || S <- AllStats]),
 
     io:format("~s~n", [string:copies("-", 70)]),
 
@@ -263,6 +279,7 @@ finish_simulation(State) ->
     io:format("  Total A* compute time:   ~.2f ms~n", [TotalPathTimeUs / 1000.0]),
     io:format("  Avg path length:         ~.1f cells~n", [float(safe_div(TotalPathLen, TotalPathReqs))]),
     io:format("  Avg A* time per request: ~.2f us~n", [float(safe_div(TotalPathTimeUs, TotalPathReqs))]),
+    io:format("  Reservation conflicts:   ~p~n", [TotalResFails]),
     io:format("  Events per wall-second:  ~p~n", [trunc(TotalEvents / max(WallDuration, 0.001))]),
 
     io:format("~n~s~n", [string:copies("=", 60)]),
